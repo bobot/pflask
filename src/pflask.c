@@ -60,12 +60,15 @@ static int clone_flags = SIGCHLD      |
                          CLONE_NEWNS  |
                          CLONE_NEWIPC |
                          CLONE_NEWPID |
-                         CLONE_NEWUTS;
+                         CLONE_NEWUTS |
+  			 CLONE_NEWUSER;
 
-static const char *short_opts = "+m:n::u:r:c:g:da:s:kUMNIHPh?";
+
+static const char *short_opts = "+m:o:n::u:r:c:g:da:s:kUMNIHPh?";
 
 static struct option long_opts[] = {
 	{ "mount",     required_argument, NULL, 'm' },
+	{ "map",       required_argument, NULL, 'o' },
 	{ "netif",     optional_argument, NULL, 'n' },
 	{ "user",      required_argument, NULL, 'u' },
 	{ "chroot",    required_argument, NULL, 'r' },
@@ -100,7 +103,8 @@ int main(int argc, char *argv[]) {
 	uid_t uid = -1;
 	gid_t gid = -1;
 
-	_free_ char *user   = NULL;
+	uid_t pw_uid = 0;
+	gid_t pw_gid = 0;
 	_free_ char *dest   = NULL;
 	_free_ char *change = NULL;
 	_free_ char *env    = NULL;
@@ -114,6 +118,12 @@ int main(int argc, char *argv[]) {
 	int keepenv = 0;
 
 	siginfo_t status;
+
+        int uid_map_set = 1;
+        uid_t uid_map;
+        unsigned int uid_len;
+        gid_t gid_map;
+        unsigned int gid_len;
 
 	while ((rc = getopt_long(argc, argv, short_opts, long_opts, &i)) !=-1) {
 		switch (rc) {
@@ -134,13 +144,23 @@ int main(int argc, char *argv[]) {
 				break;
 
 			case 'u':
-				clone_flags |= CLONE_NEWUSER;
+                                if (sscanf(optarg,"%u,%u,%u,%u",
+                                           &uid_map, &uid_len, &gid_map, &gid_len)
+                                    != 2){
+                                  fail_printf("Invalid value '%s' for --map",optarg);
+                                }
 
-				freep(&user);
-
-				user = strdup(optarg);
 				break;
 
+                        case 'o':
+                          uid_map_set = 1;
+                          if (sscanf(optarg,"%u,%u,%u,%u",
+                                     &uid_map, &uid_len, &gid_map, &gid_len)
+                              != 4){
+                            fail_printf("Invalid value '%s' for --map",optarg);
+                          }
+                          break;
+                        
 			case 'r':
 				freep(&dest);
 
@@ -196,10 +216,6 @@ int main(int argc, char *argv[]) {
 				keepenv = 1;
 				break;
 
-			case 'U':
-				clone_flags &= ~(CLONE_NEWUSER);
-				break;
-
 			case 'M':
 				clone_flags &= ~(CLONE_NEWNS);
 				break;
@@ -235,10 +251,6 @@ int main(int argc, char *argv[]) {
 		goto process_fd;
 	}
 
-	if (user == NULL) {
-		user = strdup("root");
-		if (user == NULL) fail_printf("OOM");
-	}
 
 	open_master_pty(&master_fd, &master_name);
 
@@ -248,10 +260,25 @@ int main(int argc, char *argv[]) {
 	if (detach == 1)
 		do_daemonize();
 
+        /** pipe used for the child to wait the parent
+            until the parent set the uid_map and gid_map
+         */
+        int pipe_sync[2];
+        if(pipe(pipe_sync) == -1){
+          fail_printf("pipe");
+        }
+
 	pid = do_clone();
 
 	if (pid == 0) {
-		closep(&master_fd);
+                close(pipe_sync[1]);
+                char buf;
+                if(read(pipe_sync[0],&buf,1) != 1){
+                  fail_printf("synchro failed");
+                }
+                close(pipe_sync[0]);
+
+                closep(&master_fd);
 
 		open_slave_pty(master_name);
 
@@ -261,23 +288,22 @@ int main(int argc, char *argv[]) {
 		rc = prctl(PR_SET_PDEATHSIG, SIGKILL);
 		if (rc < 0) sysf_printf("prctl(PR_SET_PDEATHSIG)");
 
-		if (clone_flags & CLONE_NEWUSER)
-			map_user_to_user(uid, gid, user);
-
 		do_cgroup(cgroup, ppid);
+
+		do_user(pw_uid, pw_gid);
 
 		do_mount(dest);
 
+		/* if (clone_flags & CLONE_NEWUSER){ */
+                /*   if (uid_map_set){ */
+                /*     map_users_to_users(getpid(),uid_map, uid_len, gid_map, gid_len); */
+                /*   }else{ */
+                /*     map_user_to_user(uid, gid, pw_uid, pw_gid); */
+                /*   } */
+                /* } */
+
 		if (dest != NULL) {
-			copy_nodes(dest);
-
-			make_ptmx(dest);
-
-			make_symlinks(dest);
-
-			make_console(dest, master_name);
-
-			do_chroot(dest);
+                  do_chroot(dest);
 		}
 
 		if (clone_flags & CLONE_NEWNET)
@@ -287,7 +313,6 @@ int main(int argc, char *argv[]) {
 
 		/* TODO: drop capabilities */
 
-		do_user(user);
 
 		if (change != NULL) {
 			rc = chdir(change);
@@ -301,8 +326,8 @@ int main(int argc, char *argv[]) {
 				clearenv();
 
 			setenv("PATH", "/usr/sbin:/usr/bin:/sbin:/bin", 1);
-			setenv("USER", user, 1);
-			setenv("LOGNAME", user, 1);
+			/* setenv("USER", user, 1); */
+			/* setenv("LOGNAME", user, 1); */
 			setenv("TERM", term, 1);
 		}
 
@@ -332,7 +357,21 @@ int main(int argc, char *argv[]) {
 		if (rc < 0) sysf_printf("exec()");
 	}
 
+        printf("pid: %i\n", pid);
+
+        if (clone_flags & CLONE_NEWUSER){
+          if (uid_map_set){
+            map_users_to_users(pid,uid_map, uid_len, gid_map, gid_len);
+          }else{
+            map_user_to_user(uid, gid, pw_uid, pw_gid);
+          }
+        }
+
 	do_netif(pid);
+
+        close(pipe_sync[0]);
+        write(pipe_sync[1],"a",1);
+        close(pipe_sync[1]);
 
 process_fd:
 	if (detach == 1)
@@ -394,16 +433,12 @@ static void do_chroot(char *dest) {
 	if (rc < 0) sysf_printf("chdir(/)");
 }
 
+#define STACK_SIZE (1024 * 1024)
+
 static pid_t do_clone(void) {
 	pid_t pid;
 
 	pid = syscall(__NR_clone, clone_flags, NULL);
-	if (pid < 0) {
-		if (errno == EINVAL) {
-			clone_flags &= ~(CLONE_NEWUSER);
-			pid = syscall(__NR_clone, clone_flags, NULL);
-		}
-	}
 
 	if (pid < 0) sysf_printf("clone()");
 
@@ -411,7 +446,9 @@ static pid_t do_clone(void) {
 }
 
 static inline void help(void) {
-	#define CMD_HELP(CMDL, CMDS, MSG) printf("  %s, %-15s \t%s.\n", COLOR_YELLOW CMDS, CMDL COLOR_OFF, MSG);
+	#define CMD_HELP(CMDL, CMDS, MSG) printf("  %s, %-15s \t%s.\n", \
+                                                 COLOR_YELLOW CMDS, \
+                                                 CMDL COLOR_OFF, MSG);
 
 	printf(COLOR_RED "Usage: " COLOR_OFF);
 	printf(COLOR_GREEN "pflask " COLOR_OFF);
@@ -422,10 +459,14 @@ static inline void help(void) {
 	CMD_HELP("--mount", "-m",
 		"Create a new mount point inside the container");
 	CMD_HELP("--netif", "-n",
-		"Create a new network namespace and optionally move a network interface inside it");
+		"Create a new network namespace and optionally move a network \
+interface inside it");
 
 	CMD_HELP("--user",  "-u",
 		"Run the command as the specified user inside the container");
+	CMD_HELP("--map",   "-o",
+		"Run the command with the given user and group map \
+\"firstuid,len,firstgid,len\"");
 
 	CMD_HELP("--chroot",  "-r",
 		"Use the specified directory as root inside the container");

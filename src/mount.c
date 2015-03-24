@@ -161,34 +161,19 @@ void do_mount(char *dest) {
 	if (rc < 0) sysf_printf("mount(MS_SLAVE)");
 
 	if (dest != NULL) {
-		/* add_mount(dest, dest, NULL, MS_BIND, "bind"); */
+          /* recursive is needed because we are in a less priviledge mount namespace */
+          /* add_mount("proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL); */
+          add_mount_inside(dest, "proc", "/proc", "proc", MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
+          /* add_mount_inside(dest, "/proc", "/proc", NULL, MS_BIND | MS_REC, NULL); */
+          add_mount_inside(dest, "/sys", "/sys", NULL, MS_BIND | MS_REC, NULL);
+          add_mount_inside(dest, "/dev", "/dev", NULL, MS_BIND | MS_REC, NULL);
 
-		add_mount_inside(dest, "proc", "/proc", "proc",
-			MS_NOSUID | MS_NOEXEC | MS_NODEV, NULL);
+          add_mount_inside(dest, "tmpfs", "/dev/shm", "tmpfs",
+                        MS_NOSUID | MS_STRICTATIME | MS_NODEV, "mode=1777");
 
-		add_mount_inside(dest, "/proc/sys", "/proc/sys", "proc/sys",
-			MS_BIND, NULL);
+          add_mount_inside(dest, "tmpfs", "/run", "tmpfs",
+                        MS_NOSUID | MS_NODEV | MS_STRICTATIME, "mode=755");
 
-		add_mount_inside(dest, NULL, "/proc/sys", "proc/sys-ro",
-			MS_BIND | MS_RDONLY | MS_REMOUNT, NULL);
-
-		add_mount_inside(dest, "sysfs", "/sys", "sysfs",
-			MS_NOSUID | MS_NOEXEC | MS_NODEV | MS_RDONLY, NULL);
-
-		add_mount_inside(dest, "tmpfs", "/dev", "tmpfs",
-			MS_NOSUID | MS_STRICTATIME, "mode=755");
-
-		add_mount_inside(dest, "devpts", "/dev/pts", "devpts",
-			MS_NOSUID | MS_NOEXEC,
-			"newinstance,ptmxmode=000,mode=620,gid=5");
-
-		add_mount_inside(dest, "tmpfs", "/dev/shm", "tmpfs",
-			MS_NOSUID | MS_STRICTATIME | MS_NODEV, "mode=1777");
-
-		add_mount_inside(dest, "tmpfs", "/run", "tmpfs",
-			MS_NOSUID | MS_NODEV | MS_STRICTATIME, "mode=755");
-
-		/* add_mount(dest, "/", NULL, MS_MOVE, "move"); */
 	}
 
 	while (mounts) {
@@ -217,7 +202,8 @@ void do_mount(char *dest) {
 		}
 
 		rc = mount(i->src, i->dst, i->type, i->flags, i->data);
-		if (rc < 0) sysf_printf("mount(%s)", i->type);
+		if (rc < 0) sysf_printf("mount(%s,%s,%s,%ld)", i->src, i->dst,
+                                        i->type, i->flags);
 
 		i = i->next;
 	}

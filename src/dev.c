@@ -47,7 +47,7 @@ void make_ptmx(char *dest) {
 	if (rc < 0) fail_printf("OOM");
 
 	rc = symlink("/dev/pts/ptmx", target);
-	if (rc < 0) sysf_printf("symlink()");
+	if (rc < 0) sysf_printf("symlink(/dev/pts/ptmx,%s)",target);
 }
 
 void make_console(char *dest, char *console) {
@@ -101,7 +101,7 @@ void make_symlinks(char *dest) {
 		if (rc < 0) fail_printf("OOM");
 
 		rc = symlink(src[i], link);
-		if (rc < 0) sysf_printf("symlink()");
+		if (rc < 0) sysf_printf("symlink(%s,%s)", src[i], link);
 	}
 }
 
@@ -130,7 +130,7 @@ void copy_nodes(char *dest) {
 		if (rc < 0) sysf_printf("stat()");
 
 		rc = mknod(target, sb.st_mode, sb.st_rdev);
-		if (rc < 0) sysf_printf("mknod()");
+		if (rc < 0) sysf_printf("mknod(%s)",target);
 	}
 
 	umask(u);

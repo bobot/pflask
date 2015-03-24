@@ -34,13 +34,14 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <sys/wait.h>
 #include <pwd.h>
 #include <grp.h>
 
 #include "printf.h"
 #include "util.h"
 
-void map_user_to_user(uid_t uid, gid_t gid, char *user) {
+void map_user_to_user(uid_t uid, gid_t gid, uid_t pw_uid, gid_t pw_gid) {
 	int rc;
 
 	_close_ int setgroups_fd = -1;
@@ -49,26 +50,6 @@ void map_user_to_user(uid_t uid, gid_t gid, char *user) {
 
 	_free_ char *uid_map = NULL;
 	_free_ char *gid_map = NULL;
-
-	uid_t pw_uid;
-	uid_t pw_gid;
-
-	struct passwd *pwd;
-
-	if (strncmp(user, "root", 5) == 0) {
-		pw_uid = 0;
-		pw_gid = 0;
-	} else {
-		errno = 0;
-		pwd = getpwnam(user);
-		if (pwd == NULL) {
-			if (errno) sysf_printf("getpwnam()");
-			else       fail_printf("Invalid user '%s'", user);
-		}
-
-		pw_uid = pwd->pw_uid;
-		pw_gid = pwd->pw_gid;
-	}
 
 	setgroups_fd = open("/proc/self/setgroups", O_RDWR);
 	if (setgroups_fd >= 0) {
@@ -79,11 +60,11 @@ void map_user_to_user(uid_t uid, gid_t gid, char *user) {
 	rc = asprintf(&uid_map, "%d %d 1", pw_uid, uid);
 	if (rc < 0) fail_printf("OOM");
 
-	uid_map_fd = open("/proc/self/uid_map", O_RDWR);
+        uid_map_fd = open("/proc/self/uid_map", O_RDWR);
 	if (uid_map_fd < 0) sysf_printf("open(uid_map)");
 
 	rc = write(uid_map_fd, uid_map, strlen(uid_map));
-	if (rc < 0) sysf_printf("write(uid_map)");
+	if (rc < 0) sysf_printf("write(uid_map):\n%s\n",uid_map);
 
 	rc = asprintf(&gid_map, "%d %d 1", pw_gid, gid);
 	if (rc < 0) fail_printf("OOM");
@@ -95,28 +76,59 @@ void map_user_to_user(uid_t uid, gid_t gid, char *user) {
 	if (rc < 0) sysf_printf("write(gid_map)");
 }
 
-void do_user(char *user) {
+/** call newuidmap or newgidmap */
+void newugidmap(char *cmd, pid_t pid, uid_t uid, unsigned int len){
+  pid_t cmd_pid;
+
+  _free_ char *pid_str;
+  _free_ char *uid_str;
+  _free_ char *len_str;
+  _free_ char *cmd_str;
+
+  int status;
+  int rc;
+
+  rc = asprintf(&pid_str, "%d", pid);
+  if (rc < 0) fail_printf("OOM");
+
+  rc = asprintf(&uid_str, "%d", uid);
+  if (rc < 0) fail_printf("OOM");
+
+  rc = asprintf(&len_str, "%d", len);
+  if (rc < 0) fail_printf("OOM");
+
+  rc = asprintf(&cmd_str, "/usr/bin/%s", cmd);
+  if (rc < 0) fail_printf("OOM");
+
+  if ((cmd_pid = fork()) == 0) {
+    execl(cmd_str, cmd, pid_str, "0", uid_str, len_str, (char *)0);
+    _exit(127);
+  }
+  if (cmd_pid == -1) {
+    fail_printf("fork for %s failed", cmd);
+  } else {
+    while (waitpid(cmd_pid, &status, 0) == -1) {
+      if (errno != EINTR){
+        status = -1;
+        break;
+      }
+    }
+    if(!WIFEXITED(status) || WEXITSTATUS(status)!=0){
+      fail_printf("call for %s %s 0 %s %s failed: %i", cmd,
+                  pid_str, uid_str, len_str, WEXITSTATUS(status));
+    }
+  }
+}
+
+void map_users_to_users(pid_t pid,
+                        uid_t uid, unsigned int uid_len,
+                        gid_t gid, unsigned int gid_len) {
+  newugidmap("newuidmap",pid, uid, uid_len);
+  newugidmap("newgidmap",pid, gid, gid_len);
+}
+
+void do_user(uid_t pw_uid, uid_t pw_gid) {
 	int rc;
-
-	uid_t pw_uid;
-	uid_t pw_gid;
-
-	struct passwd *pwd;
-
-	if (strncmp(user, "root", 5) == 0) {
-		pw_uid = 0;
-		pw_gid = 0;
-	} else {
-		errno = 0;
-		pwd = getpwnam(user);
-		if (pwd == NULL) {
-			if (errno) sysf_printf("getpwnam()");
-			else       fail_printf("Invalid user '%s'", user);
-		}
-
-		pw_uid = pwd->pw_uid;
-		pw_gid = pwd->pw_gid;
-	}
 
 	rc = setresgid(pw_gid, pw_gid, pw_gid);
 	if (rc < 0) sysf_printf("setresgid()");
